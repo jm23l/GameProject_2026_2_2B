@@ -29,10 +29,21 @@ public class DungeonRoomDate
 }
 
 [Serializable]
+
+public class DungeonRunDate
+{
+    public string id;
+    public string state;
+    public int currentRoomIndex;
+    public int runGold;
+    public DungeonRoomDate currentRoom;
+}
+
+[Serializable]
 public class DungeonStateData
 {
     public DungeonPlayerDate player;
-    public DungeonRoomDate room;
+    public DungeonRunDate run;
 }
 
 [Serializable]
@@ -42,6 +53,7 @@ public class DungeonResponse
     public string code;
     public string message;
 
+    public DungeonStateData data;
 }
 
 [Serializable]
