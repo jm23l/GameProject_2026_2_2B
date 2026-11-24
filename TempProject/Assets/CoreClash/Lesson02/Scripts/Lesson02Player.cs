@@ -1,4 +1,5 @@
 using System.Collections;
+using CoreClash.Lesson01.Course;
 using Fusion;
 using UnityEngine;
 
@@ -7,6 +8,7 @@ namespace CoreClash.Lesson02
     [RequireComponent(typeof(NetworkObject), typeof(NetworkTransform))]
     public class Lesson02Player : NetworkBehaviour
     {
+        public string PlayerDisplayName => GetComponent<TodoPlayer>()?.PlayerName.ToString() ?? "Player";
         [SerializeField] private float meleeRange = 2.2f;
         [SerializeField] private int meleeDamage = 25;
         [SerializeField] private float moveSpeed = 5f;
@@ -18,12 +20,29 @@ namespace CoreClash.Lesson02
         [Networked] private TickTimer MeleeCooldown { get; set; }
         [Networked] private NetworkButtons PreviousButtons { get; set; }
 
+        [SerializeField] private NetworkObject projecttilePrefab;
+
+        [SerializeField] private int magazineSize = 6;
+
+        [Networked] public int Ammo { get; private set; }
+        [Networked] private TickTimer FireCoolDown { get; set; }
+        [Networked] private TickTimer ReloadTimer { get; set; }
+
+        [Networked] public int kills { get; private set; }
+        [Networked] public NetworkBool IsDead { get; private set; }
+        [Networked] public NetworkBool IsInvincible { get; private set; }
+        [Networked] private TickTimer RespawnTimer { get; set; }
+        [Networked] private TickTimer IsInvincibleTimer { get; set; }
+
+
+
         public override void Spawned()
         {
             // TODO 18: StateAuthority에서 체력을 초기화하고 PlayerObject를 등록하세요.
             if (!Object.HasStateAuthority) return;
 
             Health = 100;
+            Ammo = magazineSize;
             Runner.SetPlayerObject(Object.InputAuthority, Object);
         }
 
@@ -35,9 +54,28 @@ namespace CoreClash.Lesson02
 
             ApplyMovement(input.Move);
 
+            UpdateTimer();
+
+            if (IsDead)
+            {
+                PreviousButtons = input.Buttons;
+                return;
+            }
+
+
             if (input.Buttons.WasPressed(PreviousButtons, (int)Lesson02Button.Attack))
             {
                 TryMelee();
+            }
+
+            if (input.Buttons.WasPressed(PreviousButtons, (int)Lesson02Button.Fire))
+            {
+                TryFire();
+            }
+
+            if (input.Buttons.WasPressed(PreviousButtons, (int)Lesson02Button.Reload))
+            {
+                StartReload();
             }
 
             PreviousButtons = input.Buttons;
@@ -62,7 +100,7 @@ namespace CoreClash.Lesson02
         }
 
         public void RequestAddCore(int amount) => RPC_AddCore(amount);
-        public void RequestDamage(int amount, Vector3 direction) => RPC_Damage(amount, direction);
+        public void RequestDamage(int amount, Vector3 direction, PlayerRef attacker) => RPC_Damage(amount, direction, attacker);
 
         // TODO 21: 점수 RPC의 Source와 Target을 지정하세요.
 
@@ -76,11 +114,40 @@ namespace CoreClash.Lesson02
 
         // TODO 23: 피해 RPC의 Source와 Target을 지정하세요.
         [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
-        private void RPC_Damage(int amount, Vector3 direction)
+        private void RPC_Damage(int amount, Vector3 direction, PlayerRef attacker)
         {
+            if (IsDead || IsInvincible)
+                return;
+
             // TODO 24: 체력을 감소시키고 공격 방향으로 넉백시키세요.
             Health = Mathf.Max(0, Health - amount);
             transform.position += direction.normalized * 0.45f;
+
+            if (Health == 0)
+                Die(attacker);
+        }
+
+        private void Die(PlayerRef attacker)
+        {
+            IsDead = true;
+            RespawnTimer = TickTimer.CreateFromSeconds(Runner, 3f);
+
+            if (Runner.TryGetPlayerObject(attacker, out NetworkObject attackerObject))
+            {
+                attackerObject.GetComponent<Lesson02Player>()?.RequestAddKill();
+            }
+        }
+
+        public void RequestAddKill()
+        {
+            RPC_AddKill();
+        }
+
+        [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
+
+        private void RPC_AddKill()
+        {
+            kills++;
         }
 
         private void TryMelee()
@@ -101,11 +168,50 @@ namespace CoreClash.Lesson02
                 if (target != null || target == this) 
                     continue;
 
-                target.RequestDamage(meleeDamage, transform.forward);
+                target.RequestDamage(meleeDamage, transform.forward, Object.InputAuthority);
                 break;
             }        
 
 
+        }
+
+        private void TryFire()
+        {
+            if (IsReloading()) return;
+
+            if (!FireCoolDown.ExpiredOrNotRunning(Runner)) return;
+
+            if (Ammo < 0)
+            {
+                StartReload();
+                return;
+            }
+
+            Ammo--;
+
+            FireCoolDown = TickTimer.CreateFromSeconds(Runner, 0.25f);
+
+            Vector3 position = transform.position + Vector3.up * 0.8f + transform.forward * 1.1f;
+
+            Runner.Spawn(projecttilePrefab, position, transform.rotation, Object.InputAuthority,
+                (_, obj) => obj.GetComponent<Lesson02Projectile>().Initialize(Object.InputAuthority, 20));
+
+            if (Ammo == 0)
+                StartReload();
+        }
+
+        private bool IsReloading()
+        {
+            return ReloadTimer.IsRunning && !ReloadTimer.Expired(Runner);
+        }
+
+        private void StartReload()
+        {
+            if (IsReloading()) return;
+
+            if (Ammo >= magazineSize) return;
+
+            ReloadTimer = TickTimer.CreateFromSeconds(Runner, 2.0f);
         }
 
         [Rpc(RpcSources.StateAuthority, RpcTargets.All)]
@@ -146,5 +252,33 @@ namespace CoreClash.Lesson02
             Destroy(flash);
             if (material != null) Destroy(material);
         }
+
+        private void UpdateTimer()
+        {
+            if (ReloadTimer.Expired(Runner))
+            {
+                Ammo = magazineSize;
+                ReloadTimer = TickTimer.None;
+            }
+
+            if (IsDead && RespawnTimer.Expired(Runner))
+            {
+                Health = 100;
+                IsDead = false;
+                IsInvincible = true;
+
+                IsInvincibleTimer = TickTimer.CreateFromSeconds(Runner, 2f);
+                float x = (Object.InputAuthority.RawEncoded % 5 - 2) * 2f;
+
+                transform.SetPositionAndRotation(new Vector3(x, 1f, 0f), Quaternion.identity);
+            }
+
+            if (IsInvincible && IsInvincibleTimer.Expired(Runner))
+            {
+                IsInvincible = false;
+            }
+        }
     }
+
+    
 }
